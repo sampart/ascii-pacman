@@ -1,33 +1,42 @@
 {
-This file was based on finished release 1.0.  However, I have now gone through it making various improvements (see below).
-It has been "released" as release 1.0a
-
-In time, I will hopefully get the AI from routec.pas working and include it.
+You may re-use any of this code in any commerical or non-commercial application as required.
+You may also modify this program as you wish.  However, please don't pass this application off as your own work!
 }
-
 
 {
-bugs:
-=====
+known bugs:
+===========
 no beep produced when cherry eaten (problem with messagebeep call)
 
-improvements done (not a comprehensive list):
-==============================================
-The method for checking whether in a tunnel has been radically shortened (BIG CHANGE)
-EnemyKnowledgeArray now of integers not char (note that -MaxInt-1 is the smallest int, MaxInt is the biggest)
-when playing standard level, player now shown on screen even before you start moving
-cherry now redrawn when enemy moves over it
-stuff level editor cursor moves over is correctly redrawn
-now displays the controls on the right when playing a level from the editor
-toggling of enemy or cherry looks right in the editor (before the display didn't update correctly)
-DELAY procedure improved
-various procedures and variables now have more sensible names, and some useful constants added
-a few bits of on-screen text modified
+changes since version 1.0 (not a comprehensive list)
+====================================================
+ENEMY_MOVEMENT drastically improved by the use of FIND_PATH (see website for details)
+"Wall painting" enabled.
+Multiple enemies implemented (file structure altered!)
+Cancel option included in loading, saving and path-changing in the level editor
 }
+
+{The grid is 40 by 15.  The standard level looks as follows:
+
+ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ
+ƒ                                      ƒ
+ƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒ
+ƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒ
+ƒ                                      ƒ
+ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ                    
+ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ
+ƒ                                      ƒ
+ƒƒ  ƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒ
+ƒƒ  ƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒ
+ƒ                                      ƒ
+ƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒ
+ƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒ
+ƒ                                      ƒ
+ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ}
 
 PROGRAM Pacman;
 
-USES WINCRT, WINPROCS, STRINGS, WINDOS;
+USES WINCRT, WINPROCS, STRINGS, WINDOS, STACK2I;
 
 CONST
      MinInt = -MaxInt-1; {smallest possible int}
@@ -40,26 +49,25 @@ CONST
      CherryCharacter = '¶';
      WallCharacter = 'ƒ'; {setting this to '.' is likely to cause major issues!}
 
+{This has now been modified so that positions of player, enemies and cherry are recorded by
+data in the array, rather than by separate variable}
+
 TYPE
     LevelDetails = RECORD
     LevelArray : ARRAY [1..40, 1..15] OF CHAR;
-    XEnemy : INTEGER;
-    YEnemy : INTEGER;
-    XCharacter : INTEGER;
-    YCharacter : INTEGER;
-    XCherry : INTEGER;
-    YCherry : INTEGER;
 END;
 
 VAR
    EndedGame : BOOLEAN; {Set when win or lose, checked by the game loop}
 
    LevelArray : ARRAY [1..40, 1..15] OF CHAR;
+   VisitedArray : ARRAY [1..40, 1..15] OF INTEGER;
 
    XPositionOfPlayer: INTEGER; {99 used to indicate a non-placed player; was called XPositionOfPlayer}
    YPositionOfPlayer: INTEGER; {was called YPositionOfPlayer}
-   XPositionOfEnemy: INTEGER; {99 used to indicate a non-placed or dead enemy}
-   YPositionOfEnemy: INTEGER;
+
+   EnemyStack : NodePtr; {see stack2i for details of NodePtr}
+
    XPositionOfCherry: INTEGER; {99 used to indicate a non-placed cherry}
    YPositionOfCherry: INTEGER;
 
@@ -74,7 +82,9 @@ VAR
 
    Path : STRING;
 
+{Draws player, enemies and cherry on the play area}
 PROCEDURE POSITION_OBJECTS;
+VAR CurrentEnemy : NodePtr;
 BEGIN
      {This check added in so that we can call this procedure during level editing}
      IF XPositionOfPlayer<>99 THEN
@@ -83,10 +93,12 @@ BEGIN
           WRITE (PlayerCharacter);
      END;
 
-     IF XPositionOfEnemy<>99 THEN
-     BEGIN
-          GOTOXY (XPositionOfEnemy, YPositionOfEnemy);
+     CurrentEnemy := EnemyStack;
+     WHILE (CurrentEnemy <> NIL) DO
+     BEGIN          
+          GOTOXY (CurrentEnemy^.X, CurrentEnemy^.Y);
           WRITE (EnemyCharacter);
+          CurrentEnemy := CurrentEnemy^.Next;
      END;
 
      IF XPositionOfCherry<>99 THEN
@@ -145,13 +157,15 @@ END;
 PROCEDURE WRITE_CONTROLS_TEXT;
 BEGIN
      GOTOXY (42, 1);
-     WRITE ('Welcome to Pac Man.');
+     WRITE ('Welcome to ASCII Pac Man.');
      GOTOXY (42, 3);
      WRITE ('Control Pac Man using the');
      GOTOXY (42, 4);
      WRITE ('following keys:');
      GOTOXY (42, 6);
      WRITE ('T: Up, G: Down, F: Left and H: Right.');
+     GOTOXY (42, 7);
+     WRITE ('(Press Q to quit.)')
 END;
 
 PROCEDURE DRAW_OUT_CUSTOM_GRID;
@@ -176,10 +190,55 @@ BEGIN
           POSITION_OBJECTS;
 END;
 
+{writes the specified char to the screen and the array}
+PROCEDURE WRITE_LEVEL_CHAR(SentX : INTEGER; SentY: INTEGER; SentChar : CHAR);
+BEGIN
+     GOTOXY(SentX, SentY);
+     WRITE(SentChar);
+     LevelArray[SentX,SentY]:=SentChar;
+     GOTOXY(SentX, SentY);
+END;
+
+{returns TRUE if the provided co-ordinates contain an enemy, checks all enemies on stack}
+FUNCTION ENEMY_HERE(SentX, SentY : INTEGER) : BOOLEAN;
+VAR CurrentEnemy : NodePtr;
+    EnemyFound : BOOLEAN;
+BEGIN
+     CurrentEnemy := EnemyStack;
+     EnemyFound := FALSE;
+
+     WHILE (CurrentEnemy <> NIL) AND (EnemyFound = FALSE) DO
+     BEGIN
+          IF ((CurrentEnemy^.X = SentX) AND (CurrentEnemy^.Y = SentY)) THEN
+          BEGIN
+               EnemyFound := TRUE;
+          END;
+          CurrentEnemy := CurrentEnemy^.Next;
+     END;
+
+     ENEMY_HERE := EnemyFound;
+END;
+
+{returns TRUE if the provided co-ordinates contain an enemy, player or cherry}
+FUNCTION OBJECT_HERE(SentX, SentY : INTEGER) : BOOLEAN;
+BEGIN
+     IF ((XPositionOfPlayer=SentX) AND (YPositionOfPlayer=SentY))
+     OR (ENEMY_HERE(SentX, SentY)) OR
+     ((XPositionOfCherry=SentX) AND (YPositionOfCherry=SentY)) THEN
+     BEGIN
+          OBJECT_HERE := TRUE;
+     END
+     ELSE
+     BEGIN
+          OBJECT_HERE := FALSE;
+     END;
+END;
+
+
 {moves the level edit caret by XChange in the X Direction and YChange in the Y Direction
 Negative numbers used for up / left
 Returns true if able to move (i.e. not trying to move outside area), else false}
-FUNCTION LEVEL_POS_CHANGE(XChange: INTEGER; YChange: INTEGER) : BOOLEAN;
+FUNCTION LEVEL_POS_CHANGE(XChange: INTEGER; YChange: INTEGER; PaintWall : BOOLEAN) : BOOLEAN;
 BEGIN
      IF (CursorPosX+XChange > 1) AND (CursorPosX+XChange < 40) AND
         (CursorPosY+YChange > 1) AND (CursorPosY+YChange < 15) THEN
@@ -189,6 +248,16 @@ BEGIN
           CursorPosX:=CursorPosX+XChange;
           CursorPosY:=CursorPosY+YChange;
           GOTOXY (CursorPosX, CursorPosY);
+
+          {Are we wall-painting?}
+          IF (PaintWall = TRUE) THEN
+          BEGIN
+               IF (OBJECT_HERE(CursorPosX, CursorPosY) = FALSE) THEN
+               BEGIN
+                    WRITE_LEVEL_CHAR(CursorPosX, CursorPosY, WallCharacter);
+               END;
+          END;
+
           WRITE (LevelEditCaret);
           POSITION_OBJECTS;
           LEVEL_POS_CHANGE:=TRUE;
@@ -199,59 +268,70 @@ END;
 PROCEDURE TOGGLE_WALLS;
 BEGIN
      {Check we're not trying to overwrite an object}
-     IF ((XPositionOfPlayer<>CursorPosX) OR (YPositionOfPlayer<>CursorPosY))
-     AND ((XPositionOfEnemy<>CursorPosX) OR (YPositionOfEnemy<>CursorPosY)) AND
-     ((XPositionOfCherry<>CursorPosX) OR (YPositionOfCherry<>CursorPosY)) THEN
-
+     IF (OBJECT_HERE(CursorPosX, CursorPosY) = FALSE) THEN
      BEGIN
+          {Overwrite the "level saved" message, if it's there, as we've made a change}
+          GOTOXY(1, 24);
+          WRITE('               ');
+
           {draw wall or dot?}
           IF LevelArray[CursorPosX,CursorPosY]=WallCharacter THEN
           BEGIN
-               GOTOXY (CursorPosX,CursorPosY);
-               WRITE ('.');
-               LevelArray[CursorPosX,CursorPosY]:='.';
-               GOTOXY (CursorPosX,CursorPosY);
+               WRITE_LEVEL_CHAR(CursorPosX, CursorPosY, '.');
           END
           ELSE
           BEGIN
-               GOTOXY (CursorPosX,CursorPosY);
-               WRITE (WallCharacter);
-               LevelArray[CursorPosX,CursorPosY]:=WallCharacter;
-               GOTOXY (CursorPosX,CursorPosY);
+               WRITE_LEVEL_CHAR(CursorPosX, CursorPosY, WallCharacter);
           END;
      END;
 END;
 
-{
-Used in level editing - places the enemy at the current cursor location,
-or removes him if he's already there.
+{removes the enemy from the provided location by deleting the relevent stack entry}
+{if more than one enemy is there (e.g. during gameplay), all will be removed}
+PROCEDURE REMOVE_ENEMY(EnemyPosX : INTEGER; EnemyPosY : INTEGER);
+VAR NewStack : NodePtr;
+BEGIN
+     NewStack := NIL; {error when enemy eaten without this line!}
+     WHILE (EnemyStack <> NIL) DO
+     BEGIN
+          {If not discarding, add to new stack}
+          IF ((EnemyStack^.X <> EnemyPosX) OR (EnemyStack^.Y <> EnemyPosY)) THEN
+          BEGIN
+               NewStack := PUSH(NewStack, MAKE_NODE(EnemyStack^.X, EnemyStack^.Y));
+          END;
+          EnemyStack := POP(EnemyStack);
+     END;
+     EnemyStack := NewStack;
+END;
 
-Although it says enemIES, we can only place one at present
-}
+{Used in level editing - places an enemy at the current cursor location,
+or removes it if one's already there.}
 PROCEDURE PLACE_ENEMIES;
 BEGIN
      {are we removing an enemy rather than placing one?}
-     IF (XPositionOfEnemy=CursorPosX) AND (YPositionOfEnemy=CursorPosY) THEN
+     IF (ENEMY_HERE(CursorPosX, CursorPosY)) THEN
      BEGIN
-          GOTOXY (CursorPosX,CursorPosY); {so it shows when you toggle the enemy on and off repeatedly in the same spot}
+          {Overwrite the "level saved" message, if it's there, as we've made a change}
+          GOTOXY(1, 24);
+          WRITE('               ');
+
+          GOTOXY (CursorPosX,CursorPosY); {so it shows when you toggle an enemy on and off repeatedly in the same spot}
           WRITE (LevelArray[CursorPosX, CursorPosY]);
-          XPositionOfEnemy:=99;
-          YPositionOfEnemy:=99;
+          REMOVE_ENEMY(CursorPosX, CursorPosY);
      END
 
      ELSE IF ((XPositionOfPlayer<>CursorPosX) OR (YPositionOfPlayer<>CursorPosY))
      AND ((XPositionOfCherry<>CursorPosX) OR (YPositionOfCherry<>CursorPosY))
      AND (LevelArray[CursorPosX,CursorPosY]<>WallCharacter) THEN
      BEGIN
-          IF XPositionOfEnemy<>99 THEN {since we can only place one, go and overwrite the existing one}
-          BEGIN
-               GOTOXY (XPositionOfEnemy, YPositionOfEnemy);
-               WRITE (LevelArray[XPositionOfEnemy, YPositionOfEnemy]);
-          END;
+          {Overwrite the "level saved" message, if it's there, as we've made a change}
+          GOTOXY(1, 24);
+          WRITE('               ');
+
           GOTOXY (CursorPosX, CursorPosY);
           WRITE (EnemyCharacter);
-          XPositionOfEnemy:=CursorPosX;
-          YPositionOfEnemy:=CursorPosY;
+
+          EnemyStack := PUSH(EnemyStack, MAKE_NODE(CursorPosX, CursorPosY));
      END;
 
 END;
@@ -260,8 +340,12 @@ PROCEDURE PLACE_PLAYER;
 BEGIN
      IF (LevelArray[CursorPosX, CursorPosY]<>WallCharacter)
      AND ((XPositionOfCherry<>CursorPosX) OR (YPositionOfCherry<>CursorPosY))
-     AND ((XPositionOfEnemy<>CursorPosX) OR (YPositionOfEnemy<>CursorPosY)) THEN
+     AND (NOT (ENEMY_HERE(CursorPosX, CursorPosY))) THEN
      BEGIN
+          {Overwrite the "level saved" message, if it's there, as we've made a change}
+          GOTOXY(1, 24);
+          WRITE('               ');
+
           IF XPositionOfPlayer<>99 THEN {overwrite the old player character}
           BEGIN
                GOTOXY (XPositionOfPlayer, YPositionOfPlayer);
@@ -279,6 +363,10 @@ BEGIN
      {Remove the cherry or place it?}
      IF (XPositionOfCherry=CursorPosX) AND (YPositionOfCherry=CursorPosY) THEN {remove the cherry}
      BEGIN
+          {Overwrite the "level saved" message, if it's there, as we've made a change}
+          GOTOXY(1, 24);
+          WRITE('               ');
+
           GOTOXY (CursorPosX,CursorPosY); {so it shows when you toggle the cherry on and off repeatedly in the same spot}
           WRITE (LevelArray[CursorPosX, CursorPosY]);
           XPositionOfCherry:=99;
@@ -287,8 +375,12 @@ BEGIN
 
      ELSE IF (LevelArray[CursorPosX, CursorPosY]<>WallCharacter) AND
      ((XPositionOfPlayer<>CursorPosX) OR (YPositionOfPlayer<>CursorPosY))
-     AND ((XPositionOfEnemy<>CursorPosX) OR (YPositionOfEnemy<>CursorPosY)) THEN
+     AND (NOT (ENEMY_HERE(CursorPosX, CursorPosY))) THEN
      BEGIN
+          {Overwrite the "level saved" message, if it's there, as we've made a change}
+          GOTOXY(1, 24);
+          WRITE('               ');
+
           IF XPositionOfCherry<>99 THEN {overwrite the old cherry character}
           BEGIN
                GOTOXY (XPositionOfCherry,YPositionOfCherry);
@@ -311,28 +403,52 @@ VAR LevelToSave : STRING[8];
     LevelFile : FILE OF LevelDetails;
     LevelRecord : LevelDetails;
 
+    CurrentEnemy : NodePtr; {used for cycling through the stack}
+
 
 BEGIN
      GOTOXY(1,20);
-     WRITE ('Save Level (without extension; max 8 chars): ');
+     WRITE ('Save Level (without extension; max 8 chars; "?" cancels): ');
      READLN (LevelToSave);
-     ASSIGN (LevelFile, Path+LevelToSave+'.dat');
-     REWRITE (LevelFile); 
-     FOR LinesDrawnX:=1 TO 40 DO
+
+     IF (LevelToSave[1] <> '?') THEN
      BEGIN
-          FOR LinesDrawnY:=1 TO 15 DO
+          ASSIGN (LevelFile, Path+LevelToSave+'.dat');
+          REWRITE (LevelFile); 
+          FOR LinesDrawnX:=1 TO 40 DO
           BEGIN
-               LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY]:=LevelArray[LinesDrawnX, LinesDrawnY];
+               FOR LinesDrawnY:=1 TO 15 DO
+               BEGIN
+                    LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY]:=LevelArray[LinesDrawnX, LinesDrawnY];
+               END;
           END;
+
+          {Save position of objects}
+          IF (XPositionOfPlayer <> 99) AND (YPositionOfPlayer <> 99) THEN
+          BEGIN
+               LevelRecord.LevelArray[XPositionOfPlayer, YPositionOfPlayer] := PlayerCharacter;
+          END;
+
+          CurrentEnemy := EnemyStack;
+
+          WHILE (CurrentEnemy <> NIL) DO
+          BEGIN
+               LevelRecord.LevelArray[CurrentEnemy^.X, CurrentEnemy^.Y] := EnemyCharacter;
+               CurrentEnemy := CurrentEnemy^.Next;
+          END;
+
+          IF (XPositionOfCherry <> 99) AND (YPositionOfCherry <> 99) THEN
+          BEGIN
+               LevelRecord.LevelArray[XPositionOfCherry, YPositionOfCherry] := CherryCharacter;
+          END;
+
+          WRITE (LevelFile, LevelRecord);
+          CLOSE (LevelFile);
+
+          GOTOXY(1, 24);
+          WRITE('<<Level Saved>>');
      END;
-     LevelRecord.XEnemy:=XPositionOfEnemy;
-     LevelRecord.YEnemy:=YPositionOfEnemy;
-     LevelRecord.XCharacter:=XPositionOfPlayer;
-     LevelRecord.YCharacter:=YPositionOfPlayer;
-     LevelRecord.XCherry:=XPositionOfCherry;
-     LevelRecord.YCherry:=YPositionOfCherry;
-     WRITE (LevelFile, LevelRecord);
-     CLOSE (LevelFile);
+
      {overwrite the save level text with spaces and return the cursor to its correct place for editing}
      GOTOXY(1,20);
      WRITE ('                                                                                         ');
@@ -356,74 +472,113 @@ VAR LevelToLoad : STRING[8];
 BEGIN
      REPEAT
            GOTOXY(1,20);
-           WRITE ('Load Level (without extension; max 8 chars): ');
+           WRITE ('Load Level (without extension; max 8 chars; "?" to cancel): ');
            READLN (LevelToLoad);
-           ASSIGN (LevelFile, Path+LevelToLoad+'.dat');
-           {$I-} {this code disables error checking so the program won't crash if the file doesn't exist}
-           RESET (LevelFile);
-           IF IOresult<>0 THEN
+
+           IF (LevelToLoad[1] <> '?') THEN
            BEGIN
-                GOTOXY(24, 20);
-                FOR WriteSpacesLoop:=1 TO 200 DO
+                ASSIGN (LevelFile, Path+LevelToLoad+'.dat');
+                {$I-} {this code disables error checking so the program won't crash if the file doesn't exist}
+                RESET (LevelFile);
+                IF IOresult<>0 THEN
                 BEGIN
-                     WRITE (' ');
+                     GOTOXY(24, 20);
+                     FOR WriteSpacesLoop:=1 TO 200 DO
+                     BEGIN
+                          WRITE (' ');
+                     END;
+                     GOTOXY (1, 22);
+                     WRITE ('File not found.  Please enter another file name');
+                     FileExists:=FALSE;
+                END
+                ELSE IF IOresult=0 THEN
+                BEGIN
+                     FileExists:=TRUE;
                 END;
-                GOTOXY (1, 22);
-                WRITE ('File not found.  Please enter another file name');
-                FileExists:=FALSE;
+                {$I+} {re-enable error-checking}
            END
-           ELSE IF IOresult=0 THEN
+           ELSE
            BEGIN
-                GOTOXY (1, 22);
-                WRITE ('                                               ');
-                FileExists:=TRUE;
+                FileExists := TRUE; {to break out of loop}
            END;
-           {$I+}
      UNTIL FileExists=TRUE;
 
-     {draw out the newly loaded level}
-     READ (LevelFile, LevelRecord);
-     FOR LinesDrawnX:=1 TO 40 DO
+     {overwrite "not exists" text if it's there}
+     GOTOXY (1, 22);
+     WRITE ('                                               ');
+
+
+     IF (LevelToLoad[1] <> '?') THEN
      BEGIN
-          FOR LinesDrawnY:=1 TO 15 DO
+
+          {Objects not yet placed}
+          XPositionOfPlayer:=99;
+          YPositionOfPlayer:=99;
+
+          XPositionOfCherry:=99;
+          YPositionOfCherry:=99;
+
+          EnemyStack:=CLEAR(EnemyStack);
+
+          {draw out the newly loaded level}
+          READ (LevelFile, LevelRecord);
+          FOR LinesDrawnX:=1 TO 40 DO
           BEGIN
-               LevelArray[LinesDrawnX, LinesDrawnY]:=LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY];
-               GOTOXY (LinesDrawnX, LinesDrawnY);
-               WRITE (LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY]);
+               FOR LinesDrawnY:=1 TO 15 DO
+               BEGIN
+                    IF (LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY] = PlayerCharacter) THEN
+                    BEGIN
+                         LevelArray[LinesDrawnX, LinesDrawnY]:='.';
+                         GOTOXY (LinesDrawnX, LinesDrawnY);
+                         WRITE (PlayerCharacter);
+
+                         {Set Player Position}
+                         XPositionOfPlayer := LinesDrawnX;
+                         YPositionOfPlayer := LinesDrawnY;
+                    END
+                    ELSE IF (LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY] = CherryCharacter) THEN
+                    BEGIN
+                         LevelArray[LinesDrawnX, LinesDrawnY]:='.';
+                         GOTOXY (LinesDrawnX, LinesDrawnY);
+                         WRITE (CherryCharacter);
+
+                         {Set Cherry Position}
+                         XPositionOfCherry := LinesDrawnX;
+                         YPositionOfCherry := LinesDrawnY;
+                    END
+                    ELSE IF (LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY] = EnemyCharacter) THEN
+                    BEGIN
+                         LevelArray[LinesDrawnX, LinesDrawnY]:='.';
+                         GOTOXY (LinesDrawnX, LinesDrawnY);
+                         WRITE (EnemyCharacter);
+
+                         {Set Enemy Position}
+                         EnemyStack := PUSH(EnemyStack, MAKE_NODE(LinesDrawnX, LinesDrawnY));
+                         {XPositionOfEnemy := LinesDrawnX;
+                         YPositionOfEnemy := LinesDrawnY;}
+                    END
+                    ELSE
+                    BEGIN
+                         LevelArray[LinesDrawnX, LinesDrawnY]:=LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY];
+                         GOTOXY (LinesDrawnX, LinesDrawnY);
+                         WRITE (LevelRecord.LevelArray[LinesDrawnX, LinesDrawnY]);
+                    END;
+               END;
           END;
-     END;
-     XPositionOfEnemy:=LevelRecord.XEnemy;
-     YPositionOfEnemy:=LevelRecord.YEnemy;
-     IF XPositionOfEnemy<>99 THEN
-     BEGIN
-          GOTOXY(XPositionOfEnemy, YPositionOfEnemy);
-          WRITE (EnemyCharacter);
+
+          CLOSE (LevelFile);
+
      END;
 
-     XPositionOfPlayer:=LevelRecord.XCharacter;
-     YPositionOfPlayer:=LevelRecord.YCharacter;
-     IF XPositionOfPlayer<>99 THEN
-     BEGIN
-          GOTOXY(XPositionOfPlayer, YPositionOfPlayer);
-          WRITE (PlayerCharacter);
-     END;
-
-     XPositionOfCherry:=LevelRecord.XCherry;
-     YPositionOfCherry:=LevelRecord.YCherry;
-     IF XPositionOfCherry<>99 THEN
-     BEGIN
-          GOTOXY(XPositionOfCherry, YPositionOfCherry);
-          WRITE (CherryCharacter);
-     END;
-
-     CLOSE (LevelFile);
      {overwrite the load level text with spaces and return the cursor to its correct place for editing}
      GOTOXY(1,20);
      WRITE ('                                                                                         ');
+
      GOTOXY (CursorPosX, CursorPosY);
      WRITE(LevelEditCaret);
 END;
 
+{Change the directory where levels are saved to / loaded from}
 PROCEDURE CHANGE_PATH;
 
 VAR PathExists : BOOLEAN;
@@ -432,44 +587,59 @@ VAR PathExists : BOOLEAN;
 BEGIN
      REPEAT
            GOTOXY(1,20);
-           WRITE ('Set Path: ');
+           WRITE ('Set Path ("?" cancels): ');
            READLN (Path);
-           {$I-} {this code disables error checking so the program won't crash if the path doesn't exist}
-           IF Path[LENGTH(Path)]<>'\' THEN Path:=Path+'\'; {add  trailing '\'}
-           ChDir (Path);
-           IF IOresult<>0 THEN
+
+           IF (Path[1] <> '?') THEN
            BEGIN
-                GOTOXY(1,20);
-                {this for loop clears the path input prompt and the current path message}
-                FOR WriteSpacesLoop:=1 TO 420 DO
+                {$I-} {this code disables error checking so the program won't crash if the path doesn't exist}
+                IF Path[LENGTH(Path)]<>'\' THEN Path:=Path+'\'; {add  trailing '\'}
+                ChDir (Path);
+                IF IOresult<>0 THEN
                 BEGIN
-                     WRITE (' ');
+                     GOTOXY(1,20);
+                     {this for loop clears the path input prompt and the current path message}
+                     FOR WriteSpacesLoop:=1 TO 420 DO
+                     BEGIN
+                          WRITE (' ');
+                     END;
+                     GOTOXY (1, 22);
+                     WRITE ('Path not found.  Please enter another path');
+                     PathExists:=FALSE;
+                END
+                ELSE IF IOresult=0 THEN
+                BEGIN
+                     GOTOXY (1, 22);
+                     WRITE ('                                          ');
+                     PathExists:=TRUE;
                 END;
-                GOTOXY (1, 22);
-                WRITE ('Path not found.  Please enter another path');
-                PathExists:=FALSE;
+                {$I+}
            END
-           ELSE IF IOresult=0 THEN
+           ELSE
            BEGIN
-                GOTOXY (1, 22);
-                WRITE ('                                          ');
-                PathExists:=TRUE;
-           END;
-           {$I+}
+                PathExists := TRUE; {to break out of loop}
+           END
      UNTIL PathExists=TRUE;
 
-     GOTOXY (1,23);
-     FOR WriteSpacesLoop:=1 TO 150 DO
+     IF (Path[1] <> '?') THEN
      BEGIN
-          WRITE (' ');
+          GOTOXY (1,23);
+          FOR WriteSpacesLoop:=1 TO 150 DO
+          BEGIN
+               WRITE (' ');
+          END;
+          GOTOXY (1,23);
+          WRITE ('Current Path: ', Path);
+
      END;
-     GOTOXY (1,23);
-     WRITE ('Current Path: ', Path);
+
+     {overwrite the set path message and whatever they've typed}
      GOTOXY(1, 20);
      FOR WriteSpacesLoop:=1 TO 220 DO
      BEGIN
           WRITE (' ');
      END;
+
      GOTOXY (CursorPosX, CursorPosY);
      WRITE(LevelEditCaret);
 END;
@@ -479,15 +649,18 @@ VAR UserInput : CHAR;
     LinesDrawnX : INTEGER;
     LinesDrawnY : INTEGER;
     WriteSpacesLoop : INTEGER;
+    WallPainting : BOOLEAN;
 
 BEGIN
      CLRSCR;
      LAY_BORDER_AND_GRID_OF_DOTS; {also writes to the array}
 
-     XPositionOfEnemy:=99;
-     YPositionOfEnemy:=99;
+     {Objects not placed yet}
+     EnemyStack:=CLEAR(EnemyStack);
+
      XPositionOfPlayer:=99;
      YPositionOfPlayer:=99;
+
      XPositionOfCherry:=99;
      YPositionOfCherry:=99;
 
@@ -501,19 +674,21 @@ BEGIN
      WRITE ('to move around the level and');
      GOTOXY (43,7);
      WRITE ('the [SPACEBAR] to lay/remove walls');
-     GOTOXY (43,9);
-     WRITE ('P : Place the player.');
+     GOTOXY (43, 8);
+     WRITE ('(Z turns on wall-painting)');
      GOTOXY (43,10);
-     WRITE ('E : Place / remove the enemy.');
+     WRITE ('P : Place the player.');
      GOTOXY (43,11);
+     WRITE ('E : Place / remove an enemy.');
+     GOTOXY (43,12);
      WRITE ('C : Place / remove the Cherry.');
-     GOTOXY (43,13);
-     WRITE ('L : Load Level');
      GOTOXY (43,14);
-     WRITE ('S : Save Level');
+     WRITE ('L : Load Level');
      GOTOXY (43,15);
+     WRITE ('S : Save Level');
+     GOTOXY (43,16);
      WRITE ('A : Change Path');
-     GOTOXY (43,17);
+     GOTOXY (43,18);
      WRITE ('Press Q to play the level.');
 
      GOTOXY (1,23);
@@ -529,6 +704,8 @@ BEGIN
      CursorPosY := 2;
      WRITE(LevelEditCaret);
 
+     WallPainting := FALSE; {by default, we just move around normally}
+
      REPEAT
      IF KeyPressed=TRUE THEN
      BEGIN
@@ -538,16 +715,33 @@ BEGIN
 
           'L' : LOAD_LEVEL_TO_EDIT;
           'S' : SAVE_LEVEL_TO_EDIT;
-          'T' : LEVEL_POS_CHANGE(0, -1); {up}
-          'G' : LEVEL_POS_CHANGE(0, 1); {down}
-          'F' : LEVEL_POS_CHANGE(-1, 0); {left}
-          'H' : LEVEL_POS_CHANGE(1, 0); {right}
+          'T' : LEVEL_POS_CHANGE(0, -1, WallPainting); {up}
+          'G' : LEVEL_POS_CHANGE(0, 1, WallPainting); {down}
+          'F' : LEVEL_POS_CHANGE(-1, 0, WallPainting); {left}
+          'H' : LEVEL_POS_CHANGE(1, 0, WallPainting); {right}
           'E' : PLACE_ENEMIES;
           'P' : PLACE_PLAYER;
           'C' : PLACE_CHERRY;
           'A' : CHANGE_PATH;
           'Q' : IF XPositionOfPlayer<>99 THEN BEGIN FINISH_EDITING; EXIT; END;
           ' ' : TOGGLE_WALLS;
+          'Z' :
+                IF (WallPainting = TRUE) THEN
+                BEGIN
+                     WallPainting := FALSE; 
+                END
+                ELSE
+                BEGIN
+                     WallPainting := TRUE;
+                     {We also want to draw a wall at the current location}
+                     IF (OBJECT_HERE(CursorPosX, CursorPosY) = FALSE) THEN
+                     BEGIN
+                          WRITE_LEVEL_CHAR(CursorPosX, CursorPosY, WallCharacter);
+                     END;
+                END;
+                {The user is prevented from laying objects when WallPainting is TRUE as the wall will
+                have been laid at the cursor position before they get a chance to try and place an object!
+                However, wall-toggling still works, which can make editing quicker.}
           END;
 
      END;
@@ -615,9 +809,9 @@ BEGIN
      GOTOXY (26,3);
      WRITE ('Please Maximize this window.');
      GOTOXY (32,18);
-     WRITE ('Release 1.0a');
+     WRITE ('Release 1.1');
      GOTOXY (26,20);
-     WRITE ('Please select an option.');
+     WRITE ('Please select an option:');
      GOTOXY (26,22);
      WRITE ('P - Play Standard Level');
      GOTOXY (26,23);
@@ -626,58 +820,35 @@ BEGIN
      WRITE ('A - About this program');
      GOTOXY (26,25);
      WRITE ('Q - Quit');
-     GOTOXY (50, 20);
 END;
-
-{The grid is 40 by 15.  The standard level looks as follows:
-
-ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ
-ƒ                                      ƒ
-ƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒ
-ƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒ
-ƒ                                      ƒ
-ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ                    
-ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ
-ƒ                                      ƒ
-ƒƒ  ƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒ
-ƒƒ  ƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒ
-ƒ                                      ƒ
-ƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒ
-ƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ  ƒƒƒƒƒƒƒƒƒƒ
-ƒ                                      ƒ
-ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒ}
-
 
 PROCEDURE ABOUT_INFO;
 BEGIN
      CLRSCR;
      GOTOXY (28, 3);
-     WRITE ('ASCII PACMAN RELEASE 1.0a');
+     WRITE ('ASCII PACMAN RELEASE 1.1');
      GOTOXY (1,5);
-     WRITELN ('This version is Release 1.0a.  Please report any bugs and comments to');
+     WRITELN ('This version is Release 1.1.  Please report any bugs and comments to');
      WRITE ('samATsamsolutions.co.uk (replace AT with @)');
      GOTOXY (1,8);
      WRITELN ('This game was created because I wanted to see what could be done with Windows ');
-     WRITELN ('Pascal and to do something fun with it.  Judging by the example files that ');
-     WRITELN ('came with TPW I''m not exactly pushing back the boundaries but this is more');
-     WRITELN ('difficult pascal than that we learnt at college :-)');
+     WRITELN ('Pascal and to do something fun with it.  I''ve carried on with it as it''s');
+     WRITELN ('thrown up some interesting challenges, particularly regarding enemy movement.');
      WRITELN;
-     WRITELN ('The AI is relatively limited but not too bad and I plan to improve it.  The ');
-     WRITELN ('enemy will try and move towards the player if he''s not blocked by a wall.  ');
-     WRITELN ('If he finds a dead end (tunnel) the he''ll get out and shouldn''t go back in ');
-     WRITELN ('the tunnel unless the player is in there');
+     WRITELN ('The AI in this release has been drastically improved.  See the website');
+     WRITELN ('for details: http://www.samsolutions.co.uk/sam/pacman.php');
      WRITELN;
      WRITELN ('Control Pacman / the cursor using the following keys:');
      WRITELN ('T: Up, G: Down, F: Left and H: Right.');
      WRITELN;
      WRITELN ('You complete a level by removing all dots (.) from that level.  If an enemy ');
      WRITELN ('(' + EnemyCharacter + ') manages to touch you then it''s GAME OVER but once you have the cherry');
-     WRITE ('(' + CherryCharacter + ') you can eat the enemy (the enemy changes to "' + EnemyEdibleCharacter + '" once you');
+     WRITE ('(' + CherryCharacter + ') you can eat enemies (the enemies change to "' + EnemyEdibleCharacter + '" once you');
      WRITELN (' have the cherry).');
      WRITELN;
      WRITE ('Press RETURN to continue');
      READLN;
-     INTRODUCTION; {so the introductory text is rewritten}
+     INTRODUCTION; {so that the above text is rewritten}
 END;
 
 PROCEDURE YOU_WIN;
@@ -777,17 +948,20 @@ END;
 
 PROCEDURE TEST_POSITION;
 BEGIN
-     IF (XPositionOfPlayer=XPositionOfEnemy) AND (YPositionOfPlayer=YPositionOfEnemy) AND (GotCherry=FALSE) THEN
+     IF (ENEMY_HERE(XPositionOfPlayer, YPositionOfPlayer)) THEN
      BEGIN
-          GAME_OVER;
+          IF (GotCherry=FALSE) THEN
+          BEGIN
+               GAME_OVER;
+          END
+          ELSE IF (GotCherry=TRUE) THEN
+          BEGIN
+               REMOVE_ENEMY(XPositionOfPlayer, YPositionOfPlayer);
+               {write back in the player to get rid of the enemy symbol}
+               GOTOXY(XPositionOfPlayer, YPositionOfPlayer);
+               WRITE(PlayerCharacter);
+          END
      END
-
-     ELSE IF (XPositionOfPlayer=XPositionOfEnemy) AND (YPositionOfPlayer=YPositionOfEnemy) AND (GotCherry=TRUE) THEN
-     BEGIN
-          XPositionOfEnemy:=99;
-          YPositionOfEnemy:=99;
-     END
-
      ELSE IF (XPositionOfPlayer=XPositionOfCherry) AND (YPositionOfPlayer=YPositionOfCherry) AND (GotCherry = FALSE) THEN
      BEGIN
           GOT_CHERRY;
@@ -822,172 +996,590 @@ BEGIN
 
 END;
 
-FUNCTION IN_TUNNEL(XPoint : INTEGER; YPoint : INTEGER) : BOOLEAN;
-BEGIN
-     {It is important to note that a point which has, for example, a block above it and a tunnel to its left and
-     below it i.e.
+{The function IN_TUNNEL was here.  However, with the new movement algorithm it is no longer required}
 
-     UDL
-     ƒXX
-
-     is NOT counted as a tunnel.  It's an entrance point to two different tunnels!}
-
-     {for the old, LONG way of doing this, see the file intunnel.old.
-     Note that with this new method, we can't replace the IFs with ELSE IFs -- one of the first
-     conditions may be true but not what actually makes it a tunnel.}
-
-     {DOWN is BLOCKED_OR_TUNNEL [BoT]}
-     IN_TUNNEL:=FALSE;
-
-     IF IS_BLOCKED_OR_TUNNEL(XPoint, YPoint+1) THEN
-     BEGIN
-          IF (LevelArray[XPoint+1, YPoint]=WallCharacter)
-          AND (LevelArray[XPoint-1, YPoint]=WallCharacter) THEN IN_TUNNEL:=TRUE {R&L}
-
-          ELSE IF (LevelArray[XPoint+1, YPoint]=WallCharacter)
-          AND (LevelArray[XPoint, YPoint-1]=WallCharacter) THEN IN_TUNNEL:=TRUE {R&U}
-
-          ELSE IF (LevelArray[XPoint, YPoint-1]=WallCharacter)
-          AND (LevelArray[XPoint-1, YPoint]=WallCharacter) THEN IN_TUNNEL:=TRUE {U&L}
-     END;
-
-     {UP is BoT}
-     IF IS_BLOCKED_OR_TUNNEL(XPoint, YPoint-1) THEN
-     BEGIN
-          IF (LevelArray[XPoint+1, YPoint]=WallCharacter)
-          AND (LevelArray[XPoint-1, YPoint]=WallCharacter) THEN IN_TUNNEL:=TRUE {R&L}
-
-          ELSE IF (LevelArray[XPoint+1, YPoint]=WallCharacter)
-          AND (LevelArray[XPoint, YPoint+1]=WallCharacter) THEN IN_TUNNEL:=TRUE {R&D}
-
-          ELSE IF (LevelArray[XPoint, YPoint+1]=WallCharacter)
-          AND (LevelArray[XPoint-1, YPoint]=WallCharacter) THEN IN_TUNNEL:=TRUE {D&L}
-     END;
-
-     {LEFT is BoT}
-     IF IS_BLOCKED_OR_TUNNEL(XPoint-1, YPoint) THEN
-     BEGIN
-          IF (LevelArray[XPoint+1, YPoint]=WallCharacter)
-          AND (LevelArray[XPoint, YPoint+1]=WallCharacter) THEN IN_TUNNEL:=TRUE {R&D}
-
-          ELSE IF (LevelArray[XPoint+1, YPoint]=WallCharacter)
-          AND (LevelArray[XPoint, YPoint-1]=WallCharacter) THEN IN_TUNNEL:=TRUE {R&U}
-
-          ELSE IF (LevelArray[XPoint, YPoint-1]=WallCharacter)
-          AND (LevelArray[XPoint, YPoint+1]=WallCharacter) THEN IN_TUNNEL:=TRUE {U&D}
-     END;
-
-     {RIGHT is BoT}
-     IF IS_BLOCKED_OR_TUNNEL(XPoint+1, YPoint) THEN
-     BEGIN
-          IF (LevelArray[XPoint-1, YPoint]=WallCharacter)
-          AND (LevelArray[XPoint, YPoint+1]=WallCharacter) THEN IN_TUNNEL:=TRUE {L&D}
-
-          ELSE IF (LevelArray[XPoint-1, YPoint]=WallCharacter)
-          AND (LevelArray[XPoint, YPoint-1]=WallCharacter) THEN IN_TUNNEL:=TRUE {L&U}
-
-          ELSE IF (LevelArray[XPoint, YPoint-1]=WallCharacter)
-          AND (LevelArray[XPoint, YPoint+1]=WallCharacter) THEN IN_TUNNEL:=TRUE {U&D}
-     END;
-END;
-
-{moves the enemy by XChange in the X Direction and YChange in the Y Direction
+{moves the enemy contained in StackItem by XChange in the X Direction and YChange in the Y Direction
 Negative numbers used for up / left}
-PROCEDURE ENEMY_POS_CHANGE(XChange: INTEGER; YChange: INTEGER);
+PROCEDURE ENEMY_POS_CHANGE(XChange: INTEGER; YChange: INTEGER; StackItem: NodePtr);
 BEGIN
-     GOTOXY (XPositionOfEnemy, YPositionOfEnemy);
-     IF (XPositionOfCherry = XPositionOfEnemy) AND (YPositionOfCherry = YPositionOfEnemy) AND (GotCherry = FALSE) THEN
+     GOTOXY (StackItem^.X, StackItem^.Y);
+     IF (XPositionOfCherry = StackItem^.X) AND (YPositionOfCherry = StackItem^.Y) AND (GotCherry = FALSE) THEN
      BEGIN
           WRITE (CherryCharacter);
      END
-     ELSE IF LevelArray[XPositionOfEnemy, YPositionOfEnemy]='.' THEN WRITE ('.')
-     ELSE IF LevelArray[XPositionOfEnemy, YPositionOfEnemy]=' ' THEN WRITE (' ');
+     ELSE WRITE(LevelArray[StackItem^.X, StackItem^.Y]);
 
-     GOTOXY (XPositionOfEnemy+XChange, YPositionOfEnemy+YChange);
-     XPositionOfEnemy:=XPositionOfEnemy+XChange;
-     YPositionOfEnemy:=YPositionOfEnemy+YChange;
+     GOTOXY (StackItem^.X+XChange, StackItem^.Y+YChange);
+     StackItem^.X:=StackItem^.X+XChange;
+     StackItem^.Y:=StackItem^.Y+YChange;
      IF GotCherry=FALSE THEN WRITE (EnemyCharacter)
-     ELSE IF GotCherry=TRUE THEN WRITE ('$');
+     ELSE IF GotCherry=TRUE THEN WRITE (EnemyEdibleCharacter);
+END;
+
+{returns the direction in which you should move from (StartX, StartY) to get to (EndX, EndY) quickest}
+{OneX ... FourY are used for setting up the four stacks and thus control which directions are prioritised}
+{Of NX and NY, one must be 0 as diagonals aren't allowed.  The other may be -1 or +1, nothing else will work right
+as we only want to start our explore from one square away from the enemy}
+FUNCTION FIND_PATH(StartX : INTEGER; StartY : INTEGER; EndX : INTEGER; EndY : INTEGER;
+OneX : INTEGER; OneY : INTEGER; TwoX : INTEGER; TwoY : INTEGER; ThreeX : INTEGER; ThreeY : INTEGER;
+FourX : INTEGER; FourY : INTEGER) : INTEGER;
+
+VAR
+   Stack1, Stack2, Stack3, Stack4 : NodePtr; {up, down, left, right}
+   NewStack1, NewStack2, NewStack3, NewStack4 : NodePtr; {up, down, left, right}
+   Finished : BOOLEAN;
+
+   StacksActive : INTEGER; {used to determine when only one way is still moving and so we can stop, or when nothing is moving}
+   CurrentStack : INTEGER; {used to determine which is the only moving stack if only one is moving}
+   AddedToStacksActive : BOOLEAN;
+
+   WinningStackNumber : INTEGER;
+
+BEGIN
+
+     {Set up stacks}
+     IF LevelArray[StartX+OneX, StartY+OneY] <> WallCharacter THEN
+     BEGIN
+        Stack1 := MAKE_NODE(StartX+OneX, StartY+OneY);
+     END
+     ELSE
+     BEGIN
+         Stack1 := NIL;
+     END;
+
+     IF LevelArray[StartX+TwoX, StartY+TwoY] <> WallCharacter THEN
+     BEGIN
+        Stack2 := MAKE_NODE(StartX+TwoX, StartY+TwoY);
+     END
+     ELSE
+     BEGIN
+         Stack2 := NIL;
+     END;
+
+     IF LevelArray[StartX+ThreeX, StartY+ThreeY] <> WallCharacter THEN
+     BEGIN
+        Stack3 := MAKE_NODE(StartX+ThreeX, StartY+ThreeY);
+     END
+     ELSE
+     BEGIN
+        Stack3 := NIL;
+     END;
+
+     IF LevelArray[StartX+FourX, StartY+FourY] <> WallCharacter THEN
+     BEGIN
+        Stack4 := MAKE_NODE(StartX+FourX, StartY+FourY);
+     END
+     ELSE
+     BEGIN
+         Stack4 := NIL;
+     END;
+
+     NewStack1 := NIL;
+     NewStack2 := NIL;
+     NewStack3 := NIL;
+     NewStack4 := NIL;
+
+     Finished := FALSE;
+
+     WHILE ((Finished = FALSE)) DO
+     BEGIN
+
+
+          {set up monitoring variables}
+          CurrentStack := 0;
+          StacksActive := 0;
+          AddedToStacksActive := FALSE;
+
+
+          {do stuff for each stack}
+
+          {Stack1}
+
+          WHILE ((Stack1 <> NIL) AND (Finished= FALSE)) DO
+          BEGIN
+               CurrentStack := 1;
+
+               IF (AddedToStacksActive = FALSE) THEN
+               BEGIN
+                    StacksActive := StacksActive + 1;
+                    AddedToStacksActive := TRUE;
+               END;
+
+               IF (Stack1^.X = EndX) AND (Stack1^.Y = EndY) THEN
+               BEGIN
+                    Stack1 := CLEAR(Stack1);
+                    Stack2 := CLEAR(Stack2);
+                    Stack3 := CLEAR(Stack3);
+                    Stack4 := CLEAR(Stack4);
+                    Finished := TRUE;
+                    WinningStackNumber := 1; {set up return value}
+               END;
+
+
+               {try all directions}
+
+               IF (Finished = FALSE) THEN
+               BEGIN
+
+                    IF ((LevelArray[Stack1^.X, Stack1^.Y-1] <> WallCharacter)
+                    AND (VisitedArray[Stack1^.X, Stack1^.Y-1] = 0)
+                    AND ((Stack1^.X <> StartX) OR (Stack1^.Y-1 <> StartY))) THEN
+                    BEGIN
+                         NewStack1 := PUSH(NewStack1, MAKE_NODE(Stack1^.X, Stack1^.Y-1));
+                         VisitedArray[Stack1^.X, Stack1^.Y-1] := 1;
+                    END;
+
+                    IF ((LevelArray[Stack1^.X, Stack1^.Y+1] <> WallCharacter)
+                    AND (VisitedArray[Stack1^.X, Stack1^.Y+1] = 0)
+                    AND ((Stack1^.X <> StartX) OR (Stack1^.Y+1 <> StartY))) THEN
+                    BEGIN
+                         NewStack1 := PUSH(NewStack1, MAKE_NODE(Stack1^.X, Stack1^.Y+1));
+                         VisitedArray[Stack1^.X, Stack1^.Y+1] := 1;
+                    END;
+
+                    IF ((LevelArray[Stack1^.X-1, Stack1^.Y] <> WallCharacter)
+                    AND (VisitedArray[Stack1^.X-1, Stack1^.Y] = 0)
+                    AND ((Stack1^.X-1 <> StartX) OR (Stack1^.Y <> StartY))) THEN
+                    BEGIN
+                         NewStack1 := PUSH(NewStack1, MAKE_NODE(Stack1^.X-1, Stack1^.Y));
+                         VisitedArray[Stack1^.X-1, Stack1^.Y] := 1;
+                    END;
+
+                    IF ((LevelArray[Stack1^.X+1, Stack1^.Y] <> WallCharacter)
+                    AND (VisitedArray[Stack1^.X+1, Stack1^.Y] = 0)
+                    AND ((Stack1^.X+1 <> StartX) OR (Stack1^.Y <> StartY))) THEN
+                    BEGIN
+                         NewStack1 := PUSH(NewStack1, MAKE_NODE(Stack1^.X+1, Stack1^.Y));
+                         VisitedArray[Stack1^.X+1, Stack1^.Y] := 1;
+                    END;
+
+                    Stack1 := POP(Stack1);
+
+               END;
+          END;
+
+          Stack1 := NewStack1;
+          NewStack1 := NIL;
+
+          {Stack2}
+
+          AddedToStacksActive := FALSE;
+
+          WHILE ((Stack2 <> NIL) AND (Finished= FALSE)) DO
+          BEGIN
+               CurrentStack := 2;
+
+               IF (AddedToStacksActive = FALSE) THEN
+               BEGIN
+                    StacksActive := StacksActive + 1;
+                    AddedToStacksActive := TRUE;
+               END;
+
+
+               IF (Stack2^.X = EndX) AND (Stack2^.Y = EndY) THEN
+               BEGIN
+                    Stack1 := CLEAR(Stack1);
+                    Stack2 := CLEAR(Stack2);
+                    Stack3 := CLEAR(Stack3);
+                    Stack4 := CLEAR(Stack4);
+                    Finished := TRUE;
+                    WinningStackNumber := 2; {set up return value}
+               END;
+
+
+               {try all directions}
+
+               IF (Finished = FALSE) THEN
+               BEGIN
+
+                    IF ((LevelArray[Stack2^.X, Stack2^.Y-1] <> WallCharacter)
+                    AND (VisitedArray[Stack2^.X, Stack2^.Y-1] = 0)
+                    AND ((Stack2^.X <> StartX) OR (Stack2^.Y-1 <> StartY))) THEN
+                    BEGIN
+                         NewStack2 := PUSH(NewStack2, MAKE_NODE(Stack2^.X, Stack2^.Y-1));
+                         VisitedArray[Stack2^.X, Stack2^.Y-1] := 2;
+                    END;
+
+                    IF ((LevelArray[Stack2^.X, Stack2^.Y+1] <> WallCharacter)
+                    AND (VisitedArray[Stack2^.X, Stack2^.Y+1] = 0)
+                    AND ((Stack2^.X <> StartX) OR (Stack2^.Y+1 <> StartY))) THEN
+                    BEGIN
+                         NewStack2 := PUSH(NewStack2, MAKE_NODE(Stack2^.X, Stack2^.Y+1));
+                         VisitedArray[Stack2^.X, Stack2^.Y+1] := 2;
+                    END;
+
+                    IF ((LevelArray[Stack2^.X-1, Stack2^.Y] <> WallCharacter)
+                    AND (VisitedArray[Stack2^.X-1, Stack2^.Y] = 0)
+                    AND ((Stack2^.X-1 <> StartX) OR (Stack2^.Y <> StartY))) THEN
+                    BEGIN
+                         NewStack2 := PUSH(NewStack2, MAKE_NODE(Stack2^.X-1, Stack2^.Y));
+                         VisitedArray[Stack2^.X-1, Stack2^.Y] := 2;
+                    END;
+
+                    IF ((LevelArray[Stack2^.X+1, Stack2^.Y] <> WallCharacter)
+                    AND (VisitedArray[Stack2^.X+1, Stack2^.Y] = 0)
+                    AND ((Stack2^.X+1 <> StartX) OR (Stack2^.Y <> StartY))) THEN
+                    BEGIN
+                         NewStack2 := PUSH(NewStack2, MAKE_NODE(Stack2^.X+1, Stack2^.Y));
+                         VisitedArray[Stack2^.X+1, Stack2^.Y] := 2;
+                    END;
+
+                    Stack2 := POP(Stack2);
+
+               END;
+          END;
+
+          Stack2 := NewStack2;
+          NewStack2 := NIL;
+
+          {Stack3}
+
+          AddedToStacksActive := FALSE;
+
+          WHILE ((Stack3 <> NIL) AND (Finished= FALSE)) DO
+          BEGIN
+               CurrentStack := 3;
+
+               IF (AddedToStacksActive = FALSE) THEN
+               BEGIN
+                    StacksActive := StacksActive + 1;
+                    AddedToStacksActive := TRUE;
+               END;
+
+
+               IF (Stack3^.X = EndX) AND (Stack3^.Y = EndY) THEN
+               BEGIN
+                    Stack1 := CLEAR(Stack1);
+                    Stack2 := CLEAR(Stack2);
+                    Stack3 := CLEAR(Stack3);
+                    Stack4 := CLEAR(Stack4);
+                    Finished := TRUE;
+                    WinningStackNumber := 3; {set up return value}
+               END;
+
+
+               {try all directions}
+
+               IF (Finished = FALSE) THEN
+               BEGIN
+
+                    IF ((LevelArray[Stack3^.X, Stack3^.Y-1] <> WallCharacter)
+                    AND (VisitedArray[Stack3^.X, Stack3^.Y-1] = 0)
+                    AND ((Stack3^.X <> StartX) OR (Stack3^.Y-1 <> StartY))) THEN
+                    BEGIN
+                         NewStack3 := PUSH(NewStack3, MAKE_NODE(Stack3^.X, Stack3^.Y-1));
+                         VisitedArray[Stack3^.X, Stack3^.Y-1] := 3;
+                    END;
+
+                    IF ((LevelArray[Stack3^.X, Stack3^.Y+1] <> WallCharacter)
+                    AND (VisitedArray[Stack3^.X, Stack3^.Y+1] = 0)
+                    AND ((Stack3^.X <> StartX) OR (Stack3^.Y+1 <> StartY))) THEN
+                    BEGIN
+                         NewStack3 := PUSH(NewStack3, MAKE_NODE(Stack3^.X, Stack3^.Y+1));
+                         VisitedArray[Stack3^.X, Stack3^.Y+1] := 3;
+                    END;
+
+                    IF ((LevelArray[Stack3^.X-1, Stack3^.Y] <> WallCharacter)
+                    AND (VisitedArray[Stack3^.X-1, Stack3^.Y] = 0)
+                    AND ((Stack3^.X-1 <> StartX) OR (Stack3^.Y <> StartY))) THEN
+                    BEGIN
+                         NewStack3 := PUSH(NewStack3, MAKE_NODE(Stack3^.X-1, Stack3^.Y));
+                         VisitedArray[Stack3^.X-1, Stack3^.Y] := 3;
+                    END;
+
+                    IF ((LevelArray[Stack3^.X+1, Stack3^.Y] <> WallCharacter)
+                    AND (VisitedArray[Stack3^.X+1, Stack3^.Y] = 0)
+                    AND ((Stack3^.X+1 <> StartX) OR (Stack3^.Y <> StartY))) THEN
+                    BEGIN
+                         NewStack3 := PUSH(NewStack3, MAKE_NODE(Stack3^.X+1, Stack3^.Y));
+                         VisitedArray[Stack3^.X+1, Stack3^.Y] := 3;
+                    END;
+
+                    Stack3 := POP(Stack3);
+               END;
+          END;
+
+          Stack3 := NewStack3;
+          NewStack3 := NIL;
+
+          {Stack4}
+
+          AddedToStacksActive := FALSE;
+
+          WHILE ((Stack4 <> NIL) AND (Finished = FALSE)) DO
+          BEGIN
+               CurrentStack := 4;
+
+               IF (AddedToStacksActive = FALSE) THEN
+               BEGIN
+                    StacksActive := StacksActive + 1;
+                    AddedToStacksActive := TRUE;
+               END;
+
+
+               IF (Stack4^.X = EndX) AND (Stack4^.Y = EndY) THEN
+               BEGIN
+                    Stack1 := CLEAR(Stack1);
+                    Stack2 := CLEAR(Stack2);
+                    Stack3 := CLEAR(Stack3);
+                    Stack4 := CLEAR(Stack4);
+                    Finished := TRUE;
+                    WinningStackNumber := 4; {set up return value}
+               END;
+
+               {try all directions}
+
+               IF (Finished = FALSE) THEN
+               BEGIN
+
+                    IF ((LevelArray[Stack4^.X, Stack4^.Y-1] <> WallCharacter)
+                    AND (VisitedArray[Stack4^.X, Stack4^.Y-1] = 0)
+                    AND ((Stack4^.X <> StartX) OR (Stack4^.Y-1 <> StartY))) THEN
+                    BEGIN
+                         NewStack4 := PUSH(NewStack4, MAKE_NODE(Stack4^.X, Stack4^.Y-1));
+                         VisitedArray[Stack4^.X, Stack4^.Y-1] := 4;
+                    END;
+
+                    IF ((LevelArray[Stack4^.X, Stack4^.Y+1] <> WallCharacter)
+                    AND (VisitedArray[Stack4^.X, Stack4^.Y+1] = 0)
+                    AND ((Stack4^.X <> StartX) OR (Stack4^.Y+1 <> StartY))) THEN
+                    BEGIN
+                         NewStack4 := PUSH(NewStack4, MAKE_NODE(Stack4^.X, Stack4^.Y+1));
+                         VisitedArray[Stack4^.X, Stack4^.Y+1] := 4;
+                    END;
+
+                    IF ((LevelArray[Stack4^.X-1, Stack4^.Y] <> WallCharacter)
+                    AND (VisitedArray[Stack4^.X-1, Stack4^.Y] = 0)
+                    AND ((Stack4^.X-1 <> StartX) OR (Stack4^.Y <> StartY))) THEN
+                    BEGIN
+                         NewStack4 := PUSH(NewStack4, MAKE_NODE(Stack4^.X-1, Stack4^.Y));
+                         VisitedArray[Stack4^.X-1, Stack4^.Y] := 4;
+                    END;
+
+                    IF ((LevelArray[Stack4^.X+1, Stack4^.Y] <> WallCharacter)
+                    AND (VisitedArray[Stack4^.X+1, Stack4^.Y] = 0)
+                    AND ((Stack4^.X+1 <> StartX) OR (Stack4^.Y <> StartY))) THEN
+                    BEGIN
+                         NewStack4 := PUSH(NewStack4, MAKE_NODE(Stack4^.X+1, Stack4^.Y));
+                         VisitedArray[Stack4^.X+1, Stack4^.Y] := 4;
+                    END;
+
+                    Stack4 := POP(Stack4);
+
+               END;
+
+          END;
+
+          Stack4 := NewStack4;
+          NewStack4 := NIL;
+
+          {optimisation}
+          IF StacksActive < 2 THEN
+          BEGIN
+             Finished := TRUE;
+             WinningStackNumber := CurrentStack;
+          END;
+
+          {returns 1 if should go up, 2 = down, 3 = left, 4 = right}
+          {must therefore firgure out which stack is which direction as it's not necessarily stack 1 = up anymore
+          because of the fact we can alter priorities}
+          IF (WinningStackNumber = 1) THEN
+          BEGIN
+               IF (OneX = 1) THEN
+               BEGIN
+                    FIND_PATH := 4;
+               END
+               ELSE IF (OneX = -1) THEN
+               BEGIN
+                    FIND_PATH := 3;
+               END
+               ELSE IF (OneY = 1) THEN
+               BEGIN
+                    FIND_PATH := 2;
+               END
+               ELSE IF (OneY = -1) THEN
+               BEGIN
+                    FIND_PATH := 1;
+               END
+          END
+          ELSE IF (WinningStackNumber = 2) THEN
+          BEGIN
+               IF (TwoX = 1) THEN
+               BEGIN
+                    FIND_PATH := 4;
+               END
+               ELSE IF (TwoX = -1) THEN
+               BEGIN
+                    FIND_PATH := 3;
+               END
+               ELSE IF (TwoY = 1) THEN
+               BEGIN
+                    FIND_PATH := 2;
+               END
+               ELSE IF (TwoY = -1) THEN
+               BEGIN
+                    FIND_PATH := 1;
+               END
+          END
+          ELSE IF (WinningStackNumber = 3) THEN
+          BEGIN
+               IF (ThreeX = 1) THEN
+               BEGIN
+                    FIND_PATH := 4;
+               END
+               ELSE IF (ThreeX = -1) THEN
+               BEGIN
+                    FIND_PATH := 3;
+               END
+               ELSE IF (ThreeY = 1) THEN
+               BEGIN
+                    FIND_PATH := 2;
+               END
+               ELSE IF (ThreeY = -1) THEN
+               BEGIN
+                    FIND_PATH := 1;
+               END
+          END
+          ELSE IF (WinningStackNumber = 4) THEN
+          BEGIN
+               IF (FourX = 1) THEN
+               BEGIN
+                    FIND_PATH := 4;
+               END
+               ELSE IF (FourX = -1) THEN
+               BEGIN
+                    FIND_PATH := 3;
+               END
+               ELSE IF (FourY = 1) THEN
+               BEGIN
+                    FIND_PATH := 2;
+               END
+               ELSE IF (FourY = -1) THEN
+               BEGIN
+                    FIND_PATH := 1;
+               END
+          END;
+
+
+
+     END; {outer while loop}
+
+END;
+
+PROCEDURE CLEAR_VISITED;
+VAR X, Y : INTEGER;
+BEGIN
+     FOR X := 1 TO 40 DO
+     BEGIN
+          FOR Y := 1 TO 15 DO
+          BEGIN
+               VisitedArray[X, Y] := 0;
+          END;
+     END;          
 END;
 
 PROCEDURE ENEMY_MOVEMENT;
-VAR InTunnel : BOOLEAN;
-
+VAR ReturnVal : INTEGER;
+    CurrentEnemy : NodePtr;
+    RandomNumber : INTEGER;
+    PriorityArray : ARRAY [1..24] OF STRING[4]; {used in setting PrioritiesToSend}
+    PrioritiesToSend : ARRAY [1..2, 1..4] OF INTEGER; {used in passing OneX ... FourY (see below)}
+    CurrentPrioritySet : INTEGER;
+    CurrentDirection : INTEGER;
 BEGIN
-     IF (XPositionOfEnemy<>99) THEN
+     {set up array}
+     PriorityArray[1] := 'UDLR';
+     PriorityArray[5] := 'ULRD';
+     PriorityArray[9] := 'URLD';
+     PriorityArray[13] := 'UDRL';
+     PriorityArray[17] := 'ULDR';
+     PriorityArray[21] := 'URDL';
+
+     PriorityArray[2] := 'DULR';
+     PriorityArray[6] := 'DLRU';
+     PriorityArray[10] := 'DRLU';
+     PriorityArray[14] := 'DURL';
+     PriorityArray[18] := 'DLUR';
+     PriorityArray[22] := 'DRUL';
+
+     PriorityArray[3] := 'LDUR';
+     PriorityArray[7] := 'LURD';
+     PriorityArray[11] := 'LRUD';
+     PriorityArray[15] := 'LDRU';
+     PriorityArray[19] := 'LUDR';
+     PriorityArray[23] := 'LRDU';
+
+     PriorityArray[4] := 'RULD';
+     PriorityArray[8] := 'RDLU';
+     PriorityArray[12] := 'RLUD';
+     PriorityArray[16] := 'RDUL';
+     PriorityArray[20] := 'RLDU';
+     PriorityArray[24] := 'RUDL';
+
+     CurrentPrioritySet := 0;
+
+     {cycle through enemies}
+     CurrentEnemy := EnemyStack;
+
+     WHILE (CurrentEnemy <> NIL) DO
      BEGIN
+          CLEAR_VISITED; {it's important that this is inside the while loop as otherwise all the enemies share it}
+          ReturnVal := 0; {don't move}
 
-          InTunnel:=IN_TUNNEL(XPositionOfEnemy, YPositionOfEnemy);
-
-          {The CurrentDeadEnd integer is the integer which will be written into the knowledge array.
-          When no longer in a tunnel we increment it, so that the next tunnel will have a different number
-          to the previous one (if one existed) and to the not-tunnel number (MinInt).d
-
-
-          We then use these numbers to determine whether a given square is in a tunnel, and only go in to it
-          if the player is in the same tunnel.}
-
-
-          {Update the CurrentDeadEndInteger and fill in out enemyknowledgearray, if necessary}
-          IF InTunnel=FALSE THEN
+          {set priority list}
+          CurrentPrioritySet := CurrentPrioritySet + 1;
+          IF (CurrentPrioritySet > 24) THEN
           BEGIN
-               IF (AddedtoCurrentDeadEndInteger=FALSE) THEN
+               CurrentPrioritySet := 1;
+          END;
+
+          {Each enemy only moves 2/3rds of the time.}
+          RandomNumber:=RANDOM(3);
+          IF ((RandomNumber=0) OR (RandomNumber=1)) THEN
+          BEGIN
+               {set up priority values to pass}
+               FOR CurrentDirection := 1 TO 4 DO
                BEGIN
-                    INC(CurrentDeadEndInteger);
-                    AddedtoCurrentDeadEndInteger:=TRUE;
+                    CASE PriorityArray[CurrentPrioritySet][CurrentDirection] OF
+                         'U' : BEGIN
+                                    PrioritiesToSend[1][CurrentDirection] := 0;
+                                    PrioritiesToSend[2][CurrentDirection] := -1;
+                               END;
+                         'D' : BEGIN
+                                    PrioritiesToSend[1][CurrentDirection] := 0;
+                                    PrioritiesToSend[2][CurrentDirection] := 1;
+                               END;
+                         'L' : BEGIN
+                                    PrioritiesToSend[1][CurrentDirection] := -1;
+                                    PrioritiesToSend[2][CurrentDirection] := 0;
+                               END;
+                         'R' : BEGIN
+                                    PrioritiesToSend[1][CurrentDirection] := 1;
+                                    PrioritiesToSend[2][CurrentDirection] := 0;
+                               END;
+                    END;
                END;
-          END
 
-          ELSE IF (InTunnel=TRUE) AND (EnemyKnowledgeArray[XPositionOfEnemy, YPositionOfEnemy]=MinInt) THEN
-          BEGIN
-               AddedtoCurrentDeadEndInteger:=FALSE;
-               EnemyKnowledgeArray[XPositionOfEnemy, YPositionOfEnemy]:=CurrentDeadEndInteger;
+               ReturnVal := FIND_PATH(CurrentEnemy^.X, CurrentEnemy^.Y, XPositionOfPlayer, YPositionOfPlayer,
+               PrioritiesToSend[1][1], PrioritiesToSend[2][1], PrioritiesToSend[1][2], PrioritiesToSend[2][2],
+               PrioritiesToSend[1][3], PrioritiesToSend[2][3], PrioritiesToSend[1][4], PrioritiesToSend[2][4]);
           END;
 
-          {work out movement}
-          IF (InTunnel=FALSE) OR (EnemyKnowledgeArray[XPositionOfEnemy, YPositionOfEnemy]=
-             EnemyKnowledgeArray[XPositionOfPlayer, YPositionOfPlayer])THEN
-          BEGIN
-               IF (YPositionOfPlayer>YPositionOfEnemy)
-               AND (LevelArray [XPositionOfEnemy, YPositionOfEnemy+1] <> (WallCharacter))
-               AND ((EnemyKnowledgeArray[XPositionOfEnemy, YPositionOfEnemy+1]=MinInt)
-               OR (EnemyKnowledgeArray[XPositionOfEnemy, YPositionOfEnemy+1]=
-               EnemyKnowledgeArray[XPositionOfPlayer, YPositionOfPlayer])) THEN ENEMY_POS_CHANGE(0, 1)
-
-               ELSE IF (YPositionOfPlayer<YPositionOfEnemy)
-               AND (LevelArray [XPositionOfEnemy, YPositionOfEnemy-1] <> (WallCharacter))
-               AND ((EnemyKnowledgeArray[XPositionOfEnemy, YPositionOfEnemy-1]=MinInt)
-               OR (EnemyKnowledgeArray[XPositionOfEnemy, YPositionOfEnemy-1]=
-               EnemyKnowledgeArray[XPositionOfPlayer, YPositionOfPlayer])) THEN ENEMY_POS_CHANGE(0, -1)
-
-               ELSE IF (XPositionOfPlayer>XPositionOfEnemy)
-               AND (LevelArray [XPositionOfEnemy+1, YPositionOfEnemy] <> (WallCharacter))
-               AND ((EnemyKnowledgeArray[XPositionOfEnemy+1, YPositionOfEnemy]=MinInt)
-               OR (EnemyKnowledgeArray[XPositionOfEnemy+1, YPositionOfEnemy]=
-               EnemyKnowledgeArray[XPositionOfPlayer, YPositionOfPlayer])) THEN ENEMY_POS_CHANGE(1, 0)
-
-               ELSE IF (XPositionOfPlayer<XPositionOfEnemy)
-               AND (LevelArray [XPositionOfEnemy-1, YPositionOfEnemy] <> (WallCharacter))
-               AND ((EnemyKnowledgeArray[XPositionOfEnemy-1, YPositionOfEnemy]=MinInt)
-               OR (EnemyKnowledgeArray[XPositionOfEnemy-1, YPositionOfEnemy]=
-               EnemyKnowledgeArray[XPositionOfPlayer, YPositionOfPlayer])) THEN ENEMY_POS_CHANGE(-1, 0)
-          END
-
-          ELSE IF InTunnel=TRUE THEN
-          BEGIN
-               IF NOT IS_BLOCKED_OR_TUNNEL(XPositionOfEnemy+1, YPositionOfEnemy) THEN ENEMY_POS_CHANGE(1, 0)
-               ELSE IF NOT IS_BLOCKED_OR_TUNNEL(XPositionOfEnemy-1, YPositionOfEnemy) THEN ENEMY_POS_CHANGE(-1, 0)
-               ELSE IF NOT IS_BLOCKED_OR_TUNNEL(XPositionOfEnemy, YPositionOfEnemy+1) THEN ENEMY_POS_CHANGE(0, 1)
-               ELSE IF NOT IS_BLOCKED_OR_TUNNEL(XPositionOfEnemy, YPositionOfEnemy-1) THEN ENEMY_POS_CHANGE(0, -1)
+          CASE ReturnVal OF
+               1 : ENEMY_POS_CHANGE(0, -1, CurrentEnemy);
+               2 : ENEMY_POS_CHANGE(0, 1, CurrentEnemy);
+               3 : ENEMY_POS_CHANGE(-1, 0, CurrentEnemy);
+               4 : ENEMY_POS_CHANGE(1, 0, CurrentEnemy);
           END;
-     END; {matches IF (XPositionOfEnemy<>99) THEN}
-
+     CurrentEnemy := CurrentEnemy^.Next;
+     END;
 END;
 
 PROCEDURE SETUP_STANDARD_LEVEL;
 BEGIN
-     XPositionOfEnemy:=2;
-     YPositionOfEnemy:=2;
+     EnemyStack:=CLEAR(EnemyStack);
+     EnemyStack:=PUSH(EnemyStack, MAKE_NODE(2, 2)); {add a single enemy}
+
      XPositionOfPlayer:=39;
      YPositionOfPlayer:=14;
      XPositionOfCherry:=38;
@@ -996,7 +1588,7 @@ END;
 
 PROCEDURE MAIN_PROGRAM;
 VAR UserInput : CHAR;
-    RandomNumber : INTEGER;
+CONST GameSpeed = 2; {lower number = faster.  Must be an integer}
 BEGIN
      EndedGame:=FALSE;
      WHILE EndedGame=FALSE DO
@@ -1007,7 +1599,7 @@ BEGIN
                EndedGame:=TRUE;
           END;
           GOTOXY (2, 23);
-          DELAY(2);
+          DELAY(GameSpeed);
           IF KeyPressed=TRUE THEN
           BEGIN
                UserInput:=ReadKey;
@@ -1018,32 +1610,35 @@ BEGIN
                'G' : PLAYER_POS_CHANGE(0, 1); {down}
                'F' : PLAYER_POS_CHANGE(-1, 0); {left}       
                'H' : PLAYER_POS_CHANGE(1, 0); {right}
+               'Q' : EndedGame := TRUE; {quit}
 
                ELSE
                    BEGIN
-                        RANDOMIZE;
-                        RandomNumber:=RANDOM(2);
-                        IF ((RandomNumber=1) OR (RandomNumber=2)) AND (XPositionOfEnemy<>99) THEN ENEMY_MOVEMENT;
+                        ENEMY_MOVEMENT;
                    END;
                END;
 
                TEST_POSITION;
-               RANDOMIZE;
-               RandomNumber:=RANDOM(3);
-               IF ((RandomNumber=1) OR (RandomNumber=2)) AND (XPositionOfEnemy<>99)THEN ENEMY_MOVEMENT;
+               ENEMY_MOVEMENT;
                TEST_POSITION;
           END
 
           ELSE
           BEGIN
-               RANDOMIZE;
-               RandomNumber:=RANDOM(3);
-               IF ((RandomNumber=1) OR (RandomNumber=2)) AND (XPositionOfEnemy<>99)THEN ENEMY_MOVEMENT;
+               ENEMY_MOVEMENT;
                TEST_POSITION;
           END;
      END; {end while}
+
+     EnemyStack := CLEAR(EnemyStack);
+
+     {WHILE (EnemyStack <> NIL) DO
+     BEGIN
+          EnemyStack := POP(EnemyStack);
+     END;}
 END;
 
+{Loops until the user chooses an option from the main menu}
 PROCEDURE MENU_LOOP;
 VAR   IsOptionChosen : BOOLEAN;
       OptionChosen : CHAR;
@@ -1053,6 +1648,8 @@ BEGIN
      AddedToCurrentDeadEndInteger:=TRUE;
      INTRODUCTION;
      REPEAT
+           GOTOXY (50, 20);
+
            READLN (OptionChosen);
            IF (UPCASE(OptionChosen)='P') THEN
            BEGIN
@@ -1060,22 +1657,31 @@ BEGIN
                 SETUP_STANDARD_LEVEL;
                 DRAW_STANDARD_LEVEL;
                 POSITION_OBJECTS;
-           END;
+           END
 
-           IF (UPCASE(OptionChosen)='E') THEN
+           ELSE IF (UPCASE(OptionChosen)='E') THEN
            BEGIN
                 IsOptionChosen:=TRUE;
                 LEVEL_EDITOR;
-           END;
+           END
 
-           IF (UPCASE(OptionChosen)='A') THEN
+           ELSE IF (UPCASE(OptionChosen)='A') THEN
            BEGIN
                 ABOUT_INFO;
                 IsOptionChosen:=FALSE;
-           END;
+           END
 
-           IF (UPCASE(OptionChosen)='Q') THEN
-              DONEWINCRT;
+           ELSE IF (UPCASE(OptionChosen)='Q') THEN
+           BEGIN
+                DONEWINCRT;
+           END
+
+           ELSE
+           BEGIN
+                IsOptionChosen:=FALSE;
+                GOTOXY (50, 20);
+                WRITE('                               '); {30 spaces reaches to end of screen}
+           END;
 
      UNTIL IsOptionChosen=TRUE;
 
@@ -1087,8 +1693,9 @@ END;
 {The actual program is below}
 
 BEGIN
-     Path:= 'c:\progra~1\turbop~1\windows\programs\pacman\redo\levels\';
-     StrCopy(WindowTitle, 'ASCII PACMAN RELEASE 1.0a');
+     RANDOMIZE; {should only be called once.  See http://www.merlyn.demon.co.uk/pas-rand.htm.}
+     Path:= 'c:\programming\pascal\windows\programs\pacman\levels\';
+     StrCopy(WindowTitle, 'ASCII PACMAN RELEASE 1.1');
 
      CLRSCR;
      GOTOXY (23,11);
@@ -1098,5 +1705,4 @@ BEGIN
      BEGIN
           MENU_LOOP;
      END;
-
 END.
